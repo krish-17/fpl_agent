@@ -19,10 +19,14 @@ docs.  It's the simplest useful agent you can build.
 
 from __future__ import annotations
 
+import logging
+
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from fpl.tools import ALL_TOOLS
+
+log = logging.getLogger(__name__)
 
 # ── System prompt that gives the LLM its FPL personality ─────────────
 SYSTEM_PROMPT = """\
@@ -51,6 +55,8 @@ Rules:
 
 def build_agent(model_name: str = "gpt-4o-mini", temperature: float = 0):
     """Build and return a compiled LangGraph ReAct agent."""
+    log.info("Building agent (model=%s, temp=%.1f, tools=%d)",
+             model_name, temperature, len(ALL_TOOLS))
     llm = ChatOpenAI(model=model_name, temperature=temperature)
 
     agent = create_react_agent(
@@ -59,4 +65,5 @@ def build_agent(model_name: str = "gpt-4o-mini", temperature: float = 0):
         prompt=SYSTEM_PROMPT,
     )
 
+    log.info("Agent built ✓")
     return agent

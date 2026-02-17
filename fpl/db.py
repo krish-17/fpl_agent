@@ -19,6 +19,7 @@ Setup
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import secrets
 from contextlib import contextmanager
@@ -27,6 +28,8 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras  # for RealDictCursor
 
+log = logging.getLogger(__name__)
+
 
 # ── Connection helper ────────────────────────────────────────────────
 @contextmanager
@@ -34,19 +37,23 @@ def _get_conn():
     """Yield a connection from DATABASE_URL.  Auto-commits on success."""
     url = os.environ.get("DATABASE_URL", "")
     if not url:
+        log.error("DATABASE_URL is not set")
         raise RuntimeError(
             "DATABASE_URL is not set. "
             "Add it to .env or Streamlit secrets."
         )
+    log.debug("Opening DB connection")
     conn = psycopg2.connect(url)
     try:
         yield conn
         conn.commit()
     except Exception:
+        log.exception("DB operation failed — rolling back")
         conn.rollback()
         raise
     finally:
         conn.close()
+        log.debug("DB connection closed")
 
 
 def _fetch_one(query: str, params: tuple = ()) -> dict | None:
@@ -73,6 +80,7 @@ def _execute(query: str, params: tuple = ()):
 # ── Schema bootstrap ────────────────────────────────────────────────
 def init_db():
     """Create tables if they don't exist (safe to call on every start)."""
+    log.info("Running DB migrations (CREATE TABLE IF NOT EXISTS)…")
     ddl = """
     CREATE TABLE IF NOT EXISTS managers (
         id              BIGSERIAL PRIMARY KEY,
@@ -100,6 +108,7 @@ def init_db():
         ON chat_history (manager_id, created_at);
     """
     _execute(ddl)
+    log.info("DB migrations complete ✓")
 
 
 # ── Password hashing (stdlib — no extra deps) ───────────────────────
@@ -112,6 +121,7 @@ def _hash_password(password: str, salt: str) -> str:
 # ── Manager CRUD ─────────────────────────────────────────────────────
 def create_manager(username: str, password: str) -> dict | None:
     """Register a new manager.  Returns the row dict or None if username taken."""
+    log.info("Creating manager: %s", username)
     salt = secrets.token_hex(16)
     pw_hash = _hash_password(password, salt)
     now = datetime.now(timezone.utc).isoformat()
@@ -127,18 +137,24 @@ def create_manager(username: str, password: str) -> dict | None:
                     (username, pw_hash, salt, now, now),
                 )
                 row = cur.fetchone()
+                log.info("Manager created: %s (id=%s)", username, row["id"] if row else "?")
                 return dict(row) if row else None
     except psycopg2.IntegrityError:
+        log.warning("Username already taken: %s", username)
         return None
 
 
 def verify_manager(username: str, password: str) -> dict | None:
     """Check credentials.  Returns row dict on success, None on failure."""
+    log.debug("Verifying credentials for: %s", username)
     mgr = get_manager_by_username(username)
     if mgr is None:
+        log.warning("Login failed — user not found: %s", username)
         return None
     if _hash_password(password, mgr["salt"]) != mgr["password_hash"]:
+        log.warning("Login failed — wrong password for: %s", username)
         return None
+    log.info("Login successful: %s (id=%s)", username, mgr["id"])
     return mgr
 
 
@@ -158,6 +174,7 @@ def link_fpl_team(
     overall_rank: int | None = None,
 ):
     """Attach (or update) an FPL team to a manager account."""
+    log.info("Linking FPL team %s to manager_id=%s", fpl_team_id, manager_id)
     now = datetime.now(timezone.utc).isoformat()
     _execute(
         """UPDATE managers
@@ -171,6 +188,7 @@ def link_fpl_team(
 
 def unlink_fpl_team(manager_id: int):
     """Remove the linked FPL team from a manager."""
+    log.info("Unlinking FPL team from manager_id=%s", manager_id)
     now = datetime.now(timezone.utc).isoformat()
     _execute(
         """UPDATE managers
@@ -184,6 +202,7 @@ def unlink_fpl_team(manager_id: int):
 # ── Chat history ─────────────────────────────────────────────────────
 def save_message(manager_id: int, role: str, content: str):
     """Persist a single chat message."""
+    log.debug("Saving %s message for manager_id=%s (%d chars)", role, manager_id, len(content))
     now = datetime.now(timezone.utc).isoformat()
     _execute(
         """INSERT INTO chat_history (manager_id, role, content, created_at)
@@ -194,6 +213,7 @@ def save_message(manager_id: int, role: str, content: str):
 
 def get_chat_history(manager_id: int, limit: int = 200) -> list[dict]:
     """Return recent messages for a manager, oldest first."""
+    log.debug("Loading chat history for manager_id=%s (limit=%d)", manager_id, limit)
     return _fetch_all(
         """SELECT role, content, created_at FROM chat_history
            WHERE manager_id = %s
@@ -205,6 +225,7 @@ def get_chat_history(manager_id: int, limit: int = 200) -> list[dict]:
 
 def clear_chat_history(manager_id: int):
     """Delete all chat history for a manager."""
+    log.info("Clearing chat history for manager_id=%s", manager_id)
     _execute("DELETE FROM chat_history WHERE manager_id = %s", (manager_id,))
 
 

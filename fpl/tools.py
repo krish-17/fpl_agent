@@ -8,10 +8,12 @@ can bind them to an LLM automatically.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from langchain_core.tools import tool
 from fpl.api_client import FPLClient
 
+log = logging.getLogger(__name__)
 
 # We keep a module-level client so it's reused across tool calls.
 _client = FPLClient()
@@ -45,6 +47,7 @@ def get_top_players_by_form(top_n: int = 10) -> str:
     over the recent window).  Useful for picking differentials or
     captaincy candidates.
     """
+    log.info("Tool called: get_top_players_by_form(top_n=%d)", top_n)
     players = _client.get_all_players()
     teams = {t["id"]: t["short_name"] for t in _client.get_all_teams()}
 
@@ -76,6 +79,7 @@ def get_player_details(player_name: str) -> str:
     """Look up a player by (partial) name and return their full stats
     including upcoming fixtures and recent history.
     """
+    log.info("Tool called: get_player_details(player_name=%r)", player_name)
     players = _client.get_all_players()
     teams = {t["id"]: t["short_name"] for t in _client.get_all_teams()}
     name_lower = player_name.lower()
@@ -126,6 +130,7 @@ def get_current_gameweek_info() -> str:
     """Return information about the current (or next) gameweek —
     deadlines, most-captained, chip plays, etc.
     """
+    log.info("Tool called: get_current_gameweek_info()")
     events = _client.get_gameweeks()
     current = next((e for e in events if e["is_current"]), None)
     upcoming = next((e for e in events if e["is_next"]), None)
@@ -140,6 +145,7 @@ def get_current_gameweek_info() -> str:
 @tool
 def get_fixtures_for_gameweek(gameweek: int) -> str:
     """Return all fixtures for a given gameweek number."""
+    log.info("Tool called: get_fixtures_for_gameweek(gameweek=%d)", gameweek)
     fixtures = _client.get_fixtures(gameweek=gameweek)
     teams = {t["id"]: t["short_name"] for t in _client.get_all_teams()}
 
@@ -164,6 +170,7 @@ def get_best_value_players(position: str = "MID", top_n: int = 10) -> str:
     """Return the best value players (points per £m) for a given position.
     Position must be one of: GKP, DEF, MID, FWD.
     """
+    log.info("Tool called: get_best_value_players(position=%r, top_n=%d)", position, top_n)
     pos_id = {"GKP": 1, "DEF": 2, "MID": 3, "FWD": 4}.get(position.upper())
     if pos_id is None:
         return json.dumps({"error": f"Unknown position '{position}'. Use GKP/DEF/MID/FWD."})
@@ -207,6 +214,7 @@ def get_my_team(gameweek: int | None = None) -> str:
     whether they are on the bench, and who is captain / vice-captain.
     Also includes the manager's overall rank, total points, bank, and squad value.
     """
+    log.info("Tool called: get_my_team(gameweek=%s)", gameweek)
     team_id = _get_team_id()
     if team_id is None:
         return json.dumps({"error": "FPL_TEAM_ID is not set in .env. Please add it."})
@@ -269,6 +277,7 @@ def get_my_season_history() -> str:
     Shows points, rank, bank, squad value, and transfers per gameweek.
     Also includes past-season summaries if available.
     """
+    log.info("Tool called: get_my_season_history()")
     team_id = _get_team_id()
     if team_id is None:
         return json.dumps({"error": "FPL_TEAM_ID is not set in .env. Please add it."})
@@ -305,6 +314,7 @@ def get_my_transfers() -> str:
     """Return the user's full transfer history — every transfer made this season,
     showing the player bought, player sold, prices, and when it happened.
     """
+    log.info("Tool called: get_my_transfers()")
     team_id = _get_team_id()
     if team_id is None:
         return json.dumps({"error": "FPL_TEAM_ID is not set in .env. Please add it."})

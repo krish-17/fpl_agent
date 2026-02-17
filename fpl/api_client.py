@@ -25,11 +25,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import re
 import secrets
 import uuid
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 BASE_URL = "https://fantasy.premierleague.com/api"
 
@@ -60,6 +63,7 @@ class FPLClient:
     """Lightweight synchronous client for the public FPL API."""
 
     def __init__(self, timeout: float = 30.0):
+        log.debug("Initialising FPLClient (timeout=%.1fs)", timeout)
         self._client = httpx.Client(
             base_url=BASE_URL,
             timeout=timeout,
@@ -152,12 +156,14 @@ class FPLClient:
         """
         from curl_cffi import requests as cffi_requests
 
+        log.info("FPL login starting for: %s", email)
         session = cffi_requests.Session(impersonate="chrome")
 
         # --- Step 0: Generate PKCE verifier + challenge ---
         code_verifier = _generate_code_verifier()
         code_challenge = _generate_code_challenge(code_verifier)
         initial_state = uuid.uuid4().hex
+        log.debug("PKCE challenge generated")
 
         try:
             # --- Step 1: GET the authorization page ---
@@ -181,6 +187,7 @@ class FPLClient:
                     "FPL may be in off-season / maintenance."
                 )
             access_token = m.group(1)
+            log.debug("Step 1 ✓ — got access token from auth page")
 
             # Extract hidden state value
             m = re.search(
@@ -199,6 +206,7 @@ class FPLClient:
             r_json = resp.json()
             interaction_id = r_json["interactionId"]
             response_id = r_json["id"]
+            log.debug("Step 2 ✓ — DaVinci interaction started (id=%s)", interaction_id[:12])
 
             # --- Step 3a: Polling init ---
             login_url = _LOGIN_URLS["login"].format(_STANDARD_CONNECTION_ID)
@@ -218,6 +226,7 @@ class FPLClient:
                 },
             )
             response_id = resp.json()["id"]
+            log.debug("Step 3a ✓ — polling init")
 
             # --- Step 3b: Submit email + password ---
             resp = session.post(
@@ -246,10 +255,12 @@ class FPLClient:
             # Check for login errors (bad credentials)
             if "error" in r_json or "errorMessage" in r_json:
                 err_msg = r_json.get("errorMessage") or r_json.get("error", "")
+                log.warning("Step 3b ✗ — bad credentials for %s: %s", email, err_msg)
                 raise ValueError(
                     f"Login failed: {err_msg or 'invalid email or password'}"
                 )
 
+            log.debug("Step 3b ✓ — credentials accepted")
             response_id = r_json["id"]
             connection_id = r_json.get("connectionId", _STANDARD_CONNECTION_ID)
 
@@ -286,6 +297,7 @@ class FPLClient:
             if not m:
                 raise RuntimeError("Failed to extract authorization code from redirect.")
             auth_code = m.group(1)
+            log.debug("Step 4 ✓ — got authorization code")
 
             # --- Step 5: Exchange auth code for access token ---
             resp = session.post(
@@ -299,6 +311,7 @@ class FPLClient:
                 },
             )
             access_token = resp.json()["access_token"]
+            log.debug("Step 5 ✓ — got bearer token")
 
             # --- Step 6: GET /api/me/ with the bearer token ---
             me_resp = session.get(
@@ -306,11 +319,15 @@ class FPLClient:
                 headers={"X-API-Authorization": f"Bearer {access_token}"},
             )
             me_resp.raise_for_status()
-            return me_resp.json()
+            profile = me_resp.json()
+            log.info("Step 6 ✓ — FPL login complete for %s (entry=%s)",
+                     email, profile.get("player", {}).get("entry"))
+            return profile
 
         except (ValueError, RuntimeError):
             raise
         except Exception as e:
+            log.exception("FPL login failed at an unexpected step")
             raise RuntimeError(
                 f"FPL login failed at an unexpected step: {e}\n"
                 "This may be due to off-season maintenance or API changes. "
@@ -321,7 +338,9 @@ class FPLClient:
     # Internal
     # ------------------------------------------------------------------
     def _get(self, path: str) -> dict | list:
+        log.debug("GET %s%s", BASE_URL, path)
         resp = self._client.get(path)
+        log.debug("  → %s (%d bytes)", resp.status_code, len(resp.content))
         resp.raise_for_status()
         return resp.json()
 

@@ -12,10 +12,19 @@ Features:
 
 from __future__ import annotations
 
+import logging
 import os
 
 import streamlit as st
 from dotenv import load_dotenv
+
+# ── Logging setup ────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 # Load .env locally; on Streamlit Cloud the secrets come from the dashboard
 load_dotenv()
@@ -32,6 +41,7 @@ from fpl import db  # noqa: E402  (import after env setup)
 
 # Ensure tables exist on startup
 db.init_db()
+log.info("App startup — DB ready, page rendering")
 
 # ── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
@@ -90,12 +100,14 @@ def _refresh_user():
 # ── FPL linking helpers ──────────────────────────────────────────────
 def _link_with_team_id(team_id: int):
     """Fetch FPL team info and link to the logged-in user's profile."""
+    log.info("Linking Team ID %s for user %s", team_id, st.session_state.user["username"])
     from fpl.api_client import FPLClient
 
     client = FPLClient()
     info = client.get_team_info(team_id)
 
     if not info or "detail" in info:
+        log.warning("Team ID %s not found in FPL API", team_id)
         raise ValueError(f"Team ID {team_id} not found — double-check and try again.")
 
     team_name = info.get("name", "My Team")
@@ -121,6 +133,7 @@ def _link_with_team_id(team_id: int):
 
 def _link_with_login(email: str, password: str):
     """FPL email login → extract team ID → link."""
+    log.info("FPL login-link attempt for email: %s", email)
     from fpl.api_client import FPLClient
 
     profile = FPLClient.login(email, password)
@@ -158,16 +171,22 @@ def _get_agent():
 
 
 def _run_agent(query: str) -> str:
+    log.info("Agent query: %s", query[:120])
     agent = _get_agent()
     result = agent.invoke({"messages": [{"role": "user", "content": query}]})
-    return result["messages"][-1].content
+    response = result["messages"][-1].content
+    log.info("Agent response: %d chars", len(response))
+    return response
 
 
 # ── Auth helpers ─────────────────────────────────────────────────────
 def _do_login(username: str, password: str) -> bool:
+    log.info("Sign-in attempt: %s", username)
     user = db.verify_manager(username, password)
     if user is None:
+        log.warning("Sign-in failed: %s", username)
         return False
+    log.info("Sign-in success: %s (id=%s)", username, user["id"])
     st.session_state.user = user
     # Hydrate env so tools can see the FPL team ID
     if user.get("fpl_team_id"):
@@ -182,9 +201,12 @@ def _do_login(username: str, password: str) -> bool:
 
 
 def _do_signup(username: str, password: str) -> bool:
+    log.info("Sign-up attempt: %s", username)
     user = db.create_manager(username, password)
     if user is None:
+        log.warning("Sign-up failed (username taken): %s", username)
         return False
+    log.info("Sign-up success: %s (id=%s)", username, user["id"])
     st.session_state.user = user
     st.session_state.messages = []
     st.session_state.agent = None
@@ -192,6 +214,7 @@ def _do_signup(username: str, password: str) -> bool:
 
 
 def _do_logout():
+    log.info("User signed out")
     os.environ.pop("FPL_TEAM_ID", None)
     for key in list(st.session_state.keys()):
         del st.session_state[key]
