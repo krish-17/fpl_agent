@@ -1,6 +1,9 @@
 -- ============================================================
---  FPL Agent — Supabase Schema
---  Run this in your Supabase Dashboard → SQL Editor → New Query
+--  FPL Agent — PostgreSQL Schema
+--  Works with Supabase, Neon, Railway, Render, or any Postgres.
+--
+--  Supabase:  Dashboard → SQL Editor → New Query → paste & Run
+--  Others:    psql $DATABASE_URL -f schema.sql
 -- ============================================================
 
 -- 1. Managers (app-level user accounts)
@@ -34,20 +37,17 @@ CREATE TABLE IF NOT EXISTS chat_history (
 CREATE INDEX IF NOT EXISTS idx_chat_manager
     ON chat_history (manager_id, created_at);
 
--- 3. Row-Level Security (RLS)
---    The app uses the anon/service key, so we allow all via policy.
---    If you later add Supabase Auth, tighten these.
-ALTER TABLE managers      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE chat_history  ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Allow all for service role" ON managers
-    FOR ALL USING (true) WITH CHECK (true);
-
-CREATE POLICY "Allow all for service role" ON chat_history
-    FOR ALL USING (true) WITH CHECK (true);
+-- ============================================================
+--  Supabase-only: enable RLS with a permissive policy.
+--  Skip these if you're on a different Postgres host.
+-- ============================================================
+-- ALTER TABLE managers      ENABLE ROW LEVEL SECURITY;
+-- ALTER TABLE chat_history  ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Allow all" ON managers     FOR ALL USING (true) WITH CHECK (true);
+-- CREATE POLICY "Allow all" ON chat_history FOR ALL USING (true) WITH CHECK (true);
 
 -- ============================================================
---  Useful analytics queries you can run in the SQL Editor:
+--  Useful analytics queries you can run anytime:
 -- ============================================================
 --
 --  All user prompts (newest first):

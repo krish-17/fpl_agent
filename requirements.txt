@@ -17,5 +17,5 @@ rich>=13.0.0
 # Web UI
 streamlit>=1.30.0
 
-# Database (Supabase — free hosted PostgreSQL)
-supabase>=2.0.0
+# Database (direct PostgreSQL connection)
+psycopg2-binary>=2.9.0

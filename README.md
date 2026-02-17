@@ -48,7 +48,7 @@ fpl_agent/
 ├── app.py               ← Streamlit web UI (recommended)
 ├── main.py              ← CLI entry point (REPL or one-shot)
 ├── requirements.txt     ← Python dependencies
-├── supabase_schema.sql  ← SQL to create tables in Supabase
+├── schema.sql           ← PostgreSQL table definitions
 ├── .env.example         ← template for API keys
 ├── .gitignore
 ├── README.md            ← you are here
@@ -59,8 +59,9 @@ fpl_agent/
     ├── api_client.py    ← thin wrapper around the FPL REST API
     ├── tools.py         ← LangChain @tool functions the agent can use
     ├── agent.py         ← LangGraph ReAct agent definition
-    ├── db.py            ← Supabase (PostgreSQL) persistence layer
+    ├── db.py            ← PostgreSQL persistence layer (psycopg2)
     └── login.py         ← one-time login helper to fetch your Team ID
+```
 ```
 
 ---
@@ -143,35 +144,53 @@ streamlit run app.py
 
 ### Features
 
-- **Sign up / sign in** — app-level accounts (username + password) stored in Supabase
+- **Sign up / sign in** — app-level accounts (username + password) stored in PostgreSQL
 - **Link your FPL team** — enter Team ID or log in with FPL email to auto-detect it
 - **Persistent chat** — your conversations are saved in PostgreSQL and reload when you sign back in
-- **Prompt analytics** — all user prompts are stored; run SQL in the Supabase dashboard to analyse them
+- **Prompt analytics** — all user prompts are stored; connect any SQL client to analyse them
 - **No-link mode** — general FPL queries work without linking an FPL team
 
 > 🔒 **Privacy**: FPL credentials are **never** stored — used once to look up your Team ID and discarded.
 
 ---
 
-## Database Setup (Supabase — free PostgreSQL)
+## Database Setup (free PostgreSQL)
 
-1. **Create a free project** at [supabase.com](https://supabase.com)
-2. Go to **SQL Editor** → **New Query** → paste the contents of `supabase_schema.sql` → **Run**
-3. Go to **Settings → API** → copy **Project URL** and **anon/public key**
-4. Add them to your `.env`:
+You need a PostgreSQL database. Pick any free provider:
+
+| Provider | Free tier | Get the connection string |
+|---|---|---|
+| [Supabase](https://supabase.com) | 500 MB, 2 projects | Settings → Database → Connection string → URI |
+| [Neon](https://neon.tech) | 512 MB, always-free | Dashboard → Connection Details |
+| [Railway](https://railway.app) | $5 trial credit | Postgres plugin → Connect tab |
+| Local | unlimited | `postgresql://user:pass@localhost:5432/fpl_agent` |
+
+### Steps
+
+1. **Create a database** on your chosen provider
+2. **Run the schema** — paste `schema.sql` into the SQL editor, or:
+   ```bash
+   psql $DATABASE_URL -f schema.sql
    ```
-   SUPABASE_URL=https://your-project.supabase.co
-   SUPABASE_KEY=eyJ...your-anon-key...
+3. **Set `DATABASE_URL`** in your `.env`:
+   ```
+   DATABASE_URL=postgresql://postgres:your-password@db.your-project.supabase.co:5432/postgres
    ```
 
 ### Digging into the data
 
-The Supabase dashboard gives you a full PostgreSQL playground:
+Connect any SQL client (pgAdmin, DBeaver, DataGrip, `psql`, or the Supabase/Neon web editor) to your database and query directly:
 
-- **Table Editor** — browse managers & chat_history visually
-- **SQL Editor** — run any query you want. Some starters are in `supabase_schema.sql`
-- **Logs** — see every API call to your database
-- **Realtime** — watch inserts live if you want
+```sql
+-- All user prompts, newest first
+SELECT ch.content, ch.created_at, m.username
+FROM chat_history ch
+JOIN managers m ON m.id = ch.manager_id
+WHERE ch.role = 'user'
+ORDER BY ch.created_at DESC;
+```
+
+More example queries are in `schema.sql`.
 
 ---
 
@@ -183,8 +202,7 @@ The Supabase dashboard gives you a full PostgreSQL playground:
 4. Click **Advanced settings → Secrets** and paste:
    ```toml
    OPENAI_API_KEY = "sk-..."
-   SUPABASE_URL   = "https://your-project.supabase.co"
-   SUPABASE_KEY   = "eyJ...your-anon-key..."
+   DATABASE_URL   = "postgresql://postgres:your-password@db.xyz.supabase.co:5432/postgres"
    ```
 5. Click **Deploy** — done! 🎉
 
@@ -206,10 +224,11 @@ pip install -r requirements.txt
 
 # 4. Set up environment
 copy .env.example .env
-# Edit .env → paste your OPENAI_API_KEY, SUPABASE_URL, SUPABASE_KEY
+# Edit .env → paste your OPENAI_API_KEY and DATABASE_URL
 
 # 5. Create database tables
-#    Go to supabase.com → your project → SQL Editor → paste supabase_schema.sql → Run
+psql $DATABASE_URL -f schema.sql
+# Or paste schema.sql into your Supabase/Neon SQL editor
 
 # 6. Run the web UI (recommended)
 streamlit run app.py

@@ -1,16 +1,19 @@
 """
-Supabase (PostgreSQL) persistence layer for FPL Agent.
+PostgreSQL persistence layer for FPL Agent.
 
-Tables (create these in your Supabase dashboard → SQL Editor)
+Connects directly via DATABASE_URL (standard Postgres connection string).
+Works with Supabase, Neon, Railway, Render, or any hosted Postgres.
+
+Tables
 ------
 managers     — app users (username + hashed password + linked FPL team ID)
 chat_history — every prompt/response pair, per manager
 
 Setup
 -----
-1. Create a free project at https://supabase.com
-2. Run the SQL in `supabase_schema.sql` in the SQL Editor
-3. Copy the project URL + anon key into your .env / Streamlit secrets
+1. Get a free Postgres database (e.g. Supabase, Neon, Railway)
+2. Run the SQL in `schema.sql` to create the tables
+3. Set DATABASE_URL in your .env or Streamlit secrets
 """
 
 from __future__ import annotations
@@ -18,27 +21,85 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from supabase import create_client, Client
-
-# ── Supabase client (initialised lazily) ─────────────────────────────
-_client: Client | None = None
+import psycopg2
+import psycopg2.extras  # for RealDictCursor
 
 
-def _sb() -> Client:
-    """Return a cached Supabase client, creating it on first call."""
-    global _client
-    if _client is None:
-        url = os.environ.get("SUPABASE_URL", "")
-        key = os.environ.get("SUPABASE_KEY", "")
-        if not url or not key:
-            raise RuntimeError(
-                "SUPABASE_URL and SUPABASE_KEY must be set. "
-                "Add them to .env or Streamlit secrets."
-            )
-        _client = create_client(url, key)
-    return _client
+# ── Connection helper ────────────────────────────────────────────────
+@contextmanager
+def _get_conn():
+    """Yield a connection from DATABASE_URL.  Auto-commits on success."""
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL is not set. "
+            "Add it to .env or Streamlit secrets."
+        )
+    conn = psycopg2.connect(url)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _fetch_one(query: str, params: tuple = ()) -> dict | None:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params)
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def _fetch_all(query: str, params: tuple = ()) -> list[dict]:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _execute(query: str, params: tuple = ()):
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+
+
+# ── Schema bootstrap ────────────────────────────────────────────────
+def init_db():
+    """Create tables if they don't exist (safe to call on every start)."""
+    ddl = """
+    CREATE TABLE IF NOT EXISTS managers (
+        id              BIGSERIAL PRIMARY KEY,
+        username        TEXT        NOT NULL UNIQUE,
+        password_hash   TEXT        NOT NULL,
+        salt            TEXT        NOT NULL,
+        fpl_team_id     INTEGER,
+        fpl_team_name   TEXT,
+        manager_name    TEXT,
+        overall_points  INTEGER,
+        overall_rank    INTEGER,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_history (
+        id          BIGSERIAL PRIMARY KEY,
+        manager_id  BIGINT      NOT NULL REFERENCES managers(id) ON DELETE CASCADE,
+        role        TEXT        NOT NULL CHECK (role IN ('user', 'assistant')),
+        content     TEXT        NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_manager
+        ON chat_history (manager_id, created_at);
+    """
+    _execute(ddl)
 
 
 # ── Password hashing (stdlib — no extra deps) ───────────────────────
@@ -56,25 +117,18 @@ def create_manager(username: str, password: str) -> dict | None:
     now = datetime.now(timezone.utc).isoformat()
 
     try:
-        result = (
-            _sb()
-            .table("managers")
-            .insert(
-                {
-                    "username": username,
-                    "password_hash": pw_hash,
-                    "salt": salt,
-                    "created_at": now,
-                    "updated_at": now,
-                }
-            )
-            .execute()
-        )
-        if result.data:
-            return result.data[0]
-        return None
-    except Exception:
-        # Unique-constraint violation → username taken
+        with _get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """INSERT INTO managers
+                       (username, password_hash, salt, created_at, updated_at)
+                       VALUES (%s, %s, %s, %s, %s)
+                       RETURNING *""",
+                    (username, pw_hash, salt, now, now),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    except psycopg2.IntegrityError:
         return None
 
 
@@ -89,15 +143,10 @@ def verify_manager(username: str, password: str) -> dict | None:
 
 
 def get_manager_by_username(username: str) -> dict | None:
-    result = (
-        _sb()
-        .table("managers")
-        .select("*")
-        .ilike("username", username)
-        .limit(1)
-        .execute()
+    return _fetch_one(
+        "SELECT * FROM managers WHERE LOWER(username) = LOWER(%s)",
+        (username,),
     )
-    return result.data[0] if result.data else None
 
 
 def link_fpl_team(
@@ -110,80 +159,63 @@ def link_fpl_team(
 ):
     """Attach (or update) an FPL team to a manager account."""
     now = datetime.now(timezone.utc).isoformat()
-    _sb().table("managers").update(
-        {
-            "fpl_team_id": fpl_team_id,
-            "fpl_team_name": fpl_team_name,
-            "manager_name": manager_name,
-            "overall_points": overall_points,
-            "overall_rank": overall_rank,
-            "updated_at": now,
-        }
-    ).eq("id", manager_id).execute()
+    _execute(
+        """UPDATE managers
+           SET fpl_team_id = %s, fpl_team_name = %s, manager_name = %s,
+               overall_points = %s, overall_rank = %s, updated_at = %s
+           WHERE id = %s""",
+        (fpl_team_id, fpl_team_name, manager_name,
+         overall_points, overall_rank, now, manager_id),
+    )
 
 
 def unlink_fpl_team(manager_id: int):
     """Remove the linked FPL team from a manager."""
     now = datetime.now(timezone.utc).isoformat()
-    _sb().table("managers").update(
-        {
-            "fpl_team_id": None,
-            "fpl_team_name": None,
-            "manager_name": None,
-            "overall_points": None,
-            "overall_rank": None,
-            "updated_at": now,
-        }
-    ).eq("id", manager_id).execute()
+    _execute(
+        """UPDATE managers
+           SET fpl_team_id = NULL, fpl_team_name = NULL, manager_name = NULL,
+               overall_points = NULL, overall_rank = NULL, updated_at = %s
+           WHERE id = %s""",
+        (now, manager_id),
+    )
 
 
 # ── Chat history ─────────────────────────────────────────────────────
 def save_message(manager_id: int, role: str, content: str):
     """Persist a single chat message."""
     now = datetime.now(timezone.utc).isoformat()
-    _sb().table("chat_history").insert(
-        {
-            "manager_id": manager_id,
-            "role": role,
-            "content": content,
-            "created_at": now,
-        }
-    ).execute()
+    _execute(
+        """INSERT INTO chat_history (manager_id, role, content, created_at)
+           VALUES (%s, %s, %s, %s)""",
+        (manager_id, role, content, now),
+    )
 
 
 def get_chat_history(manager_id: int, limit: int = 200) -> list[dict]:
     """Return recent messages for a manager, oldest first."""
-    result = (
-        _sb()
-        .table("chat_history")
-        .select("role, content, created_at")
-        .eq("manager_id", manager_id)
-        .order("created_at", desc=True)
-        .order("id", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    return list(reversed(result.data)) if result.data else []
+    return _fetch_all(
+        """SELECT role, content, created_at FROM chat_history
+           WHERE manager_id = %s
+           ORDER BY created_at DESC, id DESC
+           LIMIT %s""",
+        (manager_id, limit),
+    )[::-1]  # reverse so oldest first
 
 
 def clear_chat_history(manager_id: int):
     """Delete all chat history for a manager."""
-    _sb().table("chat_history").delete().eq("manager_id", manager_id).execute()
+    _execute("DELETE FROM chat_history WHERE manager_id = %s", (manager_id,))
 
 
 def get_all_prompts(limit: int = 500) -> list[dict]:
-    """Return all user prompts across managers (for analysis).
-
-    NOTE: For heavier analytics, use the Supabase dashboard directly —
-    you can run arbitrary SQL there.
-    """
-    result = (
-        _sb()
-        .table("chat_history")
-        .select("content, created_at, manager_id")
-        .eq("role", "user")
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
+    """Return all user prompts across managers (for analysis)."""
+    return _fetch_all(
+        """SELECT ch.content, ch.created_at, m.username
+           FROM chat_history ch
+           JOIN managers m ON m.id = ch.manager_id
+           WHERE ch.role = 'user'
+           ORDER BY ch.created_at DESC
+           LIMIT %s""",
+        (limit,),
     )
-    return result.data if result.data else []
