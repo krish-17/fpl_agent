@@ -46,6 +46,20 @@ CREATE INDEX IF NOT EXISTS idx_chat_manager
 -- CREATE POLICY "Allow all" ON managers     FOR ALL USING (true) WITH CHECK (true);
 -- CREATE POLICY "Allow all" ON chat_history FOR ALL USING (true) WITH CHECK (true);
 
+-- 3. Draft squads (saved gameweek plans per manager)
+CREATE TABLE IF NOT EXISTS draft_squads (
+    id              BIGSERIAL PRIMARY KEY,
+    manager_id      BIGINT      NOT NULL REFERENCES managers(id) ON DELETE CASCADE,
+    gameweek        INTEGER     NOT NULL,
+    squad_json      JSONB       NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (manager_id, gameweek)
+);
+
+CREATE INDEX IF NOT EXISTS idx_draft_squads_manager_gw
+    ON draft_squads (manager_id, gameweek);
+
 -- ============================================================
 --  Useful analytics queries you can run anytime:
 -- ============================================================

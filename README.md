@@ -45,10 +45,10 @@ You ──► LangGraph ReAct Loop ──► LLM decides what to do
 
 ```
 fpl_agent/
-├── app.py               ← Streamlit web UI (recommended)
+├── app.py               ← Streamlit web UI (modular tab renderers: Chat, My Team, Transfer Hub, Gameweek Prep, Dream Team)
 ├── main.py              ← CLI entry point (REPL or one-shot)
 ├── requirements.txt     ← Python dependencies
-├── schema.sql           ← PostgreSQL table definitions
+├── schema.sql           ← PostgreSQL table definitions (managers, chat_history, draft_squads)
 ├── .env.example         ← template for API keys
 ├── .gitignore
 ├── README.md            ← you are here
@@ -56,10 +56,10 @@ fpl_agent/
 │   └── config.toml      ← FPL-themed dark mode for Streamlit
 └── fpl/
     ├── __init__.py
-    ├── api_client.py    ← thin wrapper around the FPL REST API
-    ├── tools.py         ← LangChain @tool functions the agent can use
+    ├── api_client.py    ← thin wrapper around the FPL REST API (with bootstrap caching)
+    ├── tools.py         ← LangChain @tool functions (16 tools, grouped by section)
     ├── agent.py         ← LangGraph ReAct agent definition
-    ├── db.py            ← PostgreSQL persistence layer (psycopg2)
+    ├── db.py            ← PostgreSQL persistence layer (managers, chat_history, draft_squads)
     └── login.py         ← one-time login helper to fetch your Team ID
 ```
 ```
@@ -104,6 +104,24 @@ Base URL: `https://fantasy.premierleague.com/api`
 | `get_my_team` | Your current squad — 15 players, captain, bench, budget, chip |
 | `get_my_season_history` | GW-by-GW points, rank trajectory, squad value over time |
 | `get_my_transfers` | Every transfer you've made — who in/out, prices, when |
+| `get_my_team_structured` | Pitch-view structured squad (XI + bench, with next fixture) |
+
+### Planning & Transfer Tools
+
+| Tool | What it does |
+|---|---|
+| `get_dream_team_full15` | Best possible 15-man squad for a GW (live points, FPL constraints) |
+| `recommend_transfers` | Smart transfer plans with form, fixtures, risk scoring |
+| `suggest_replacements_for_player` | Ranked replacement candidates for any squad player (with budget, behaviour tags, scores) |
+
+### Behaviour / Predictability Tools
+
+| Tool | What it does |
+|---|---|
+| `classify_player_archetype` | Classify a player as explosive talisman, consistent grinder, etc. |
+| `get_player_volatility_profile` | Per-GW points distribution, haul/blank rates, volatility score |
+| `find_talisman_players` | League-wide ranking of most talismanic players by club attacking share |
+| `analyze_squad_risk_profile` | Full squad risk audit — volatility, reliability, club exposure, regression watch |
 
 ---
 
@@ -144,11 +162,17 @@ streamlit run app.py
 
 ### Features
 
+- **5-tab layout** — Chat · My Team · Transfer Hub · Gameweek Prep · Dream Team
+- **My Team** — pitch-style visualization with XI + bench, captain badges, prices, form, next fixture, plus Geek View player inspector with archetype & volatility analysis
+- **Transfer Hub** — AI-powered transfer recommender with horizon (1 GW vs 5 GW), risk slider, hit control
+- **Gameweek Prep** — next-GW snapshot, squad risk profile, interactive Draft Builder, and prep summary
+- **Draft Builder** — pick players to replace, explore ranked candidates within budget (with behaviour tags, fixture analysis), build and save a draft squad per gameweek
+- **Dream Team** — compute the best possible 15-man squad for any gameweek using live data + FPL constraints
 - **Sign up / sign in** — app-level accounts (username + password) stored in PostgreSQL
 - **Link your FPL team** — enter Team ID or log in with FPL email to auto-detect it
 - **Persistent chat** — your conversations are saved in PostgreSQL and reload when you sign back in
 - **Prompt analytics** — all user prompts are stored; connect any SQL client to analyse them
-- **No-link mode** — general FPL queries work without linking an FPL team
+- **No-link mode** — general FPL queries and Dream Team work without linking an FPL team
 
 > 🔒 **Privacy**: FPL credentials are **never** stored — used once to look up your Team ID and discarded.
 
@@ -254,9 +278,9 @@ You: Tell me about Gyökeres — is he worth the price?
 
 ## What's Next? (ideas to build on)
 
-1. **Transfer recommender** — add your team ID, let the agent suggest transfers
+1. **Top 10 managers league view** — compare your squad to the top overall managers
 2. **Squad optimizer** — use linear programming to pick the best 15 under budget
 3. **Chip advisor** — analyse when to play Wildcard / Triple Captain / Bench Boost
-4. **Memory** — add conversation memory so the agent remembers your squad
+4. **Memory** — add conversation memory so the agent remembers your squad across sessions
 5. **Notifications** — schedule the agent to alert you before deadlines
 6. **Backtest** — replay past seasons to evaluate strategy quality

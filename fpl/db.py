@@ -6,19 +6,21 @@ Works with Supabase, Neon, Railway, Render, or any hosted Postgres.
 
 Tables
 ------
-managers     — app users (username + hashed password + linked FPL team ID)
-chat_history — every prompt/response pair, per manager
+managers       — app users (username + hashed password + linked FPL team ID)
+chat_history   — every prompt/response pair, per manager
+draft_squads   — saved draft squad plans per manager per gameweek
 
 Setup
 -----
 1. Get a free Postgres database (e.g. Supabase, Neon, Railway)
-2. Run the SQL in `schema.sql` to create the tables
+2. Run the SQL in ``schema.sql`` to create the tables
 3. Set DATABASE_URL in your .env or Streamlit secrets
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -31,7 +33,7 @@ import psycopg2.extras  # for RealDictCursor
 log = logging.getLogger(__name__)
 
 
-# ── Connection helper ────────────────────────────────────────────────
+# ── Core DB Helpers ──────────────────────────────────────────────────
 @contextmanager
 def _get_conn():
     """Yield a connection from DATABASE_URL.  Auto-commits on success."""
@@ -57,6 +59,7 @@ def _get_conn():
 
 
 def _fetch_one(query: str, params: tuple = ()) -> dict | None:
+    """Execute *query* and return the first row as a dict, or None."""
     with _get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, params)
@@ -65,6 +68,7 @@ def _fetch_one(query: str, params: tuple = ()) -> dict | None:
 
 
 def _fetch_all(query: str, params: tuple = ()) -> list[dict]:
+    """Execute *query* and return all rows as a list of dicts."""
     with _get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, params)
@@ -72,6 +76,7 @@ def _fetch_all(query: str, params: tuple = ()) -> list[dict]:
 
 
 def _execute(query: str, params: tuple = ()):
+    """Execute a statement (INSERT / UPDATE / DELETE) with no return value."""
     with _get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(query, params)
@@ -106,6 +111,19 @@ def init_db():
 
     CREATE INDEX IF NOT EXISTS idx_chat_manager
         ON chat_history (manager_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS draft_squads (
+        id              BIGSERIAL PRIMARY KEY,
+        manager_id      BIGINT      NOT NULL REFERENCES managers(id) ON DELETE CASCADE,
+        gameweek        INTEGER     NOT NULL,
+        squad_json      JSONB       NOT NULL,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (manager_id, gameweek)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_draft_squads_manager_gw
+        ON draft_squads (manager_id, gameweek);
     """
     _execute(ddl)
     log.info("DB migrations complete ✓")
@@ -118,7 +136,7 @@ def _hash_password(password: str, salt: str) -> str:
     ).hex()
 
 
-# ── Manager CRUD ─────────────────────────────────────────────────────
+# ── Managers / Auth ──────────────────────────────────────────────────
 def create_manager(username: str, password: str) -> dict | None:
     """Register a new manager.  Returns the row dict or None if username taken."""
     log.info("Creating manager: %s", username)
@@ -159,6 +177,7 @@ def verify_manager(username: str, password: str) -> dict | None:
 
 
 def get_manager_by_username(username: str) -> dict | None:
+    """Look up a manager row by username (case-insensitive). Returns dict or None."""
     return _fetch_one(
         "SELECT * FROM managers WHERE LOWER(username) = LOWER(%s)",
         (username,),
@@ -240,3 +259,34 @@ def get_all_prompts(limit: int = 500) -> list[dict]:
            LIMIT %s""",
         (limit,),
     )
+
+
+# ── Draft squads ─────────────────────────────────────────────────────
+def save_draft_squad(manager_id: int, gameweek: int, squad_json: dict) -> None:
+    """Upsert a draft squad for (manager_id, gameweek)."""
+    log.info("Saving draft squad for manager_id=%s, GW%s", manager_id, gameweek)
+    now = datetime.now(timezone.utc).isoformat()
+    _execute(
+        """INSERT INTO draft_squads (manager_id, gameweek, squad_json, created_at, updated_at)
+           VALUES (%s, %s, %s, %s, %s)
+           ON CONFLICT (manager_id, gameweek)
+           DO UPDATE SET squad_json = EXCLUDED.squad_json,
+                        updated_at = EXCLUDED.updated_at""",
+        (manager_id, gameweek, json.dumps(squad_json), now, now),
+    )
+
+
+def get_draft_squad(manager_id: int, gameweek: int) -> dict | None:
+    """Return the saved draft squad JSON for (manager_id, gameweek), or None."""
+    log.debug("Loading draft squad for manager_id=%s, GW%s", manager_id, gameweek)
+    row = _fetch_one(
+        """SELECT squad_json FROM draft_squads
+           WHERE manager_id = %s AND gameweek = %s""",
+        (manager_id, gameweek),
+    )
+    if row is None:
+        return None
+    val = row["squad_json"]
+    if isinstance(val, str):
+        return json.loads(val)
+    return val

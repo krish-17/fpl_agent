@@ -28,6 +28,7 @@ import json
 import logging
 import re
 import secrets
+import time
 import uuid
 
 import httpx
@@ -35,6 +36,11 @@ import httpx
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://fantasy.premierleague.com/api"
+
+# ── Module-level bootstrap cache (avoids repeated heavy fetches) ─────
+_bootstrap_cache: dict | None = None
+_bootstrap_ts: float = 0.0
+_BOOTSTRAP_TTL = 300  # seconds (5 min)
 
 # --- OAuth / DaVinci login constants ---
 _LOGIN_BASE = "https://account.premierleague.com"
@@ -71,11 +77,18 @@ class FPLClient:
         )
 
     # ------------------------------------------------------------------
-    # Bootstrap (the "everything" endpoint)
+    # Bootstrap (the "everything" endpoint) — cached at module level
     # ------------------------------------------------------------------
     def get_bootstrap(self) -> dict:
-        """Return the full bootstrap-static payload (players, teams, events, …)."""
-        return self._get("/bootstrap-static/")
+        """Return the full bootstrap-static payload (players, teams, events, …).
+        Cached for _BOOTSTRAP_TTL seconds to avoid repeated heavy fetches."""
+        global _bootstrap_cache, _bootstrap_ts
+        now = time.time()
+        if _bootstrap_cache is None or (now - _bootstrap_ts) > _BOOTSTRAP_TTL:
+            _bootstrap_cache = self._get("/bootstrap-static/")
+            _bootstrap_ts = now
+            log.debug("Bootstrap cache refreshed")
+        return _bootstrap_cache
 
     def get_all_players(self) -> list[dict]:
         """Return the 'elements' list — every registered player."""
@@ -92,6 +105,47 @@ class FPLClient:
     def get_element_types(self) -> list[dict]:
         """Return position types (GKP, DEF, MID, FWD)."""
         return self.get_bootstrap()["element_types"]
+
+    def get_current_gameweek(self) -> int | None:
+        """Return the current gameweek id, or None if off-season."""
+        events = self.get_gameweeks()
+        current = next((e for e in events if e.get("is_current")), None)
+        if current:
+            return current["id"]
+        # fallback: last finished GW
+        finished = [e for e in events if e.get("finished")]
+        return finished[-1]["id"] if finished else None
+
+    def get_next_gameweek(self) -> int | None:
+        """Return the next gameweek id, or None."""
+        events = self.get_gameweeks()
+        nxt = next((e for e in events if e.get("is_next")), None)
+        return nxt["id"] if nxt else None
+
+    def get_fixture_difficulty_map(self, gw_start: int, gw_end: int) -> dict[int, list]:
+        """Return {team_id: [{gw, opponent_short, difficulty, is_home}, ...]} for the
+        given gameweek range (inclusive).  Useful for transfer planning."""
+        teams = {t["id"]: t["short_name"] for t in self.get_all_teams()}
+        fixtures = self.get_fixtures()  # all fixtures
+        result: dict[int, list] = {}
+        for f in fixtures:
+            gw = f.get("event")
+            if gw is None or gw < gw_start or gw > gw_end:
+                continue
+            for side, opp_side, home_flag in [
+                ("team_h", "team_a", True),
+                ("team_a", "team_h", False),
+            ]:
+                tid = f[side]
+                diff_key = "team_h_difficulty" if home_flag else "team_a_difficulty"
+                diff = f.get(diff_key, 3)
+                result.setdefault(tid, []).append({
+                    "gw": gw,
+                    "opponent": teams.get(f[opp_side], "?"),
+                    "difficulty": diff,
+                    "is_home": home_flag,
+                })
+        return result
 
     # ------------------------------------------------------------------
     # Player detail
