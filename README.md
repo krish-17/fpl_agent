@@ -1,4 +1,4 @@
-# FPL Agent 🏈
+# FPL Agent
 
 An AI-powered Fantasy Premier League assistant built with **LangChain** + **LangGraph**.
 
@@ -48,14 +48,18 @@ fpl_agent/
 ├── app.py               ← Streamlit web UI (recommended)
 ├── main.py              ← CLI entry point (REPL or one-shot)
 ├── requirements.txt     ← Python dependencies
+├── supabase_schema.sql  ← SQL to create tables in Supabase
 ├── .env.example         ← template for API keys
 ├── .gitignore
 ├── README.md            ← you are here
+├── .streamlit/
+│   └── config.toml      ← FPL-themed dark mode for Streamlit
 └── fpl/
     ├── __init__.py
     ├── api_client.py    ← thin wrapper around the FPL REST API
     ├── tools.py         ← LangChain @tool functions the agent can use
     ├── agent.py         ← LangGraph ReAct agent definition
+    ├── db.py            ← Supabase (PostgreSQL) persistence layer
     └── login.py         ← one-time login helper to fetch your Team ID
 ```
 
@@ -131,7 +135,7 @@ This will:
 
 ## Web UI (Recommended)
 
-The Streamlit web UI provides a chat interface with **session-based authentication**:
+The Streamlit web UI provides a chat interface with **user accounts + persistent chat history**:
 
 ```bash
 streamlit run app.py
@@ -139,12 +143,50 @@ streamlit run app.py
 
 ### Features
 
-- **Sidebar login** — enter your FPL email & password to connect your account
-- **Session-only credentials** — your password is used once to fetch your Team ID, then discarded. Your Team ID lives in memory only — it's wiped when you log out or close the tab
-- **Chat interface** — ask the agent anything, with full conversation history
-- **No-login mode** — general FPL queries work without connecting an account
+- **Sign up / sign in** — app-level accounts (username + password) stored in Supabase
+- **Link your FPL team** — enter Team ID or log in with FPL email to auto-detect it
+- **Persistent chat** — your conversations are saved in PostgreSQL and reload when you sign back in
+- **Prompt analytics** — all user prompts are stored; run SQL in the Supabase dashboard to analyse them
+- **No-link mode** — general FPL queries work without linking an FPL team
 
-> 🔒 **Privacy**: Credentials are **never** written to disk through the UI. They exist only in your browser session's memory.
+> 🔒 **Privacy**: FPL credentials are **never** stored — used once to look up your Team ID and discarded.
+
+---
+
+## Database Setup (Supabase — free PostgreSQL)
+
+1. **Create a free project** at [supabase.com](https://supabase.com)
+2. Go to **SQL Editor** → **New Query** → paste the contents of `supabase_schema.sql` → **Run**
+3. Go to **Settings → API** → copy **Project URL** and **anon/public key**
+4. Add them to your `.env`:
+   ```
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_KEY=eyJ...your-anon-key...
+   ```
+
+### Digging into the data
+
+The Supabase dashboard gives you a full PostgreSQL playground:
+
+- **Table Editor** — browse managers & chat_history visually
+- **SQL Editor** — run any query you want. Some starters are in `supabase_schema.sql`
+- **Logs** — see every API call to your database
+- **Realtime** — watch inserts live if you want
+
+---
+
+## Deploy to Streamlit Community Cloud (free)
+
+1. Push this repo to **GitHub** (public or private)
+2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app**
+3. Select your repo, branch, and set **Main file path** = `app.py`
+4. Click **Advanced settings → Secrets** and paste:
+   ```toml
+   OPENAI_API_KEY = "sk-..."
+   SUPABASE_URL   = "https://your-project.supabase.co"
+   SUPABASE_KEY   = "eyJ...your-anon-key..."
+   ```
+5. Click **Deploy** — done! 🎉
 
 ---
 
@@ -162,11 +204,14 @@ python -m venv .venv
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Set your OpenAI key
+# 4. Set up environment
 copy .env.example .env
-# Edit .env → paste your OPENAI_API_KEY
+# Edit .env → paste your OPENAI_API_KEY, SUPABASE_URL, SUPABASE_KEY
 
-# 5. Run the web UI (recommended)
+# 5. Create database tables
+#    Go to supabase.com → your project → SQL Editor → paste supabase_schema.sql → Run
+
+# 6. Run the web UI (recommended)
 streamlit run app.py
 
 # — OR — run the CLI

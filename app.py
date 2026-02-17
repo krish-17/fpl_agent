@@ -4,9 +4,9 @@ FPL Agent — Streamlit Web UI
 Run:  streamlit run app.py
 
 Features:
-  • App-level sign up / sign in (username + password, stored in SQLite)
+  • App-level sign up / sign in (username + password, stored in Supabase)
   • Link your FPL team via Team ID or FPL email login
-  • Persistent chat history per user (stored in SQLite)
+  • Persistent chat history per user (PostgreSQL via Supabase)
   • All user prompts saved for requirement analysis
 """
 
@@ -17,10 +17,18 @@ import os
 import streamlit as st
 from dotenv import load_dotenv
 
-from fpl import db
-
-# Load .env for OPENAI_API_KEY (never ask for it in the UI)
+# Load .env locally; on Streamlit Cloud the secrets come from the dashboard
 load_dotenv()
+
+# Hydrate env vars from Streamlit secrets (for Cloud deployment)
+# This bridges st.secrets → os.environ so fpl/db.py and tools pick them up.
+for _key in ("OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY"):
+    if _key not in os.environ:
+        _val = st.secrets.get(_key, "")
+        if _val:
+            os.environ[_key] = _val
+
+from fpl import db  # noqa: E402  (import after env setup)
 
 # ── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
