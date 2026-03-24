@@ -13,6 +13,9 @@ Key endpoints used
 /entry/{team_id}/            → manager info (public, no auth)
 /entry/{team_id}/history/    → season history
 /entry/{team_id}/event/{gw}/picks/ → squad picks for a GW
+/entry/{team_id}/transfers/  → transfer history
+/leagues-classic/{id}/standings/ → classic league standings
+/leagues-h2h/{id}/standings/     → head-to-head league standings
 
 Authentication (login)
 ----------------------
@@ -190,6 +193,28 @@ class FPLClient:
     def get_team_transfers(self, team_id: int) -> list[dict]:
         """Full transfer history for a manager (every transfer they've ever made)."""
         return self._get(f"/entry/{team_id}/transfers/")
+
+    # ------------------------------------------------------------------
+    # Mini-Leagues
+    # ------------------------------------------------------------------
+    def get_manager_leagues(self, team_id: int) -> dict:
+        """Return all leagues (classic + h2h) the manager is in.
+        Extracts the 'leagues' dict from /entry/{team_id}/.
+        Returns: {'classic': [...], 'h2h': [...], 'cup': {...}, ...}"""
+        info = self.get_team_info(team_id)
+        return info.get("leagues", {})
+
+    def get_league_standings(self, league_id: int, page: int = 1) -> dict:
+        """Return standings for a classic league.
+        GET /leagues-classic/{league_id}/standings/?page_standings={page}
+        Returns: {league: {...}, standings: {results: [...], has_next: bool}}"""
+        return self._get(f"/leagues-classic/{league_id}/standings/?page_standings={page}")
+
+    def get_h2h_league_standings(self, league_id: int, page: int = 1) -> dict:
+        """Return standings for a H2H league.
+        GET /leagues-h2h/{league_id}/standings/?page_standings={page}
+        Returns: {league: {...}, standings: {results: [...], has_next: bool}}"""
+        return self._get(f"/leagues-h2h/{league_id}/standings/?page_standings={page}")
 
     # ------------------------------------------------------------------
     # Authentication — OAuth2 + PKCE via PingOne DaVinci

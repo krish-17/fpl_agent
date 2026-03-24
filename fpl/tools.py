@@ -9,10 +9,11 @@ Sections:
   2. Behaviour / predictability helpers
   3. General FPL Tools
   4. My Team / Manager Tools
-  5. Planning & Transfer Tools
-  6. Behaviour & Risk Tools
-  7. Draft Builder Tools
-  8. ALL_TOOLS export
+  5. League & Rival Tools
+  6. Planning & Transfer Tools
+  7. Behaviour & Risk Tools
+  8. Draft Builder Tools
+  9. ALL_TOOLS export
 """
 
 from __future__ import annotations
@@ -1659,6 +1660,306 @@ def suggest_replacements_for_player(
 
 
 # ======================================================================
+#  LEAGUE & RIVAL TOOLS
+# ======================================================================
+
+
+@tool
+def get_my_leagues() -> str:
+    """Return all mini-leagues the user is in (classic and H2H).
+    Shows league name, ID, type, current rank, last rank, and entry count.
+    """
+    log.info("Tool called: get_my_leagues()")
+    team_id = _get_team_id()
+    if team_id is None:
+        return json.dumps({"error": "FPL_TEAM_ID is not set. Link your team first."})
+
+    leagues_data = _client.get_manager_leagues(team_id)
+
+    results = []
+    for league_type in ["classic", "h2h"]:
+        for lg in leagues_data.get(league_type, []):
+            results.append({
+                "id": lg.get("id"),
+                "name": lg.get("name"),
+                "type": league_type,
+                "rank": lg.get("entry_rank"),
+                "last_rank": lg.get("entry_last_rank"),
+                "entry_count": lg.get("league_entry_count", "?"),
+            })
+
+    return json.dumps(results, indent=2)
+
+
+@tool
+def get_league_standings(league_id: int, top_n: int = 20) -> str:
+    """Return the top N standings for a mini-league.
+    Shows rank, manager name, team name, total points, GW points, and team_id.
+    """
+    log.info("Tool called: get_league_standings(league_id=%s, top_n=%s)", league_id, top_n)
+    try:
+        data = _client.get_league_standings(league_id)
+    except Exception as e:
+        return json.dumps({"error": f"Could not fetch league {league_id}: {e}"})
+
+    league_info = data.get("league", {})
+    standings = data.get("standings", {}).get("results", [])[:top_n]
+
+    results = []
+    for s in standings:
+        results.append({
+            "rank": s.get("rank"),
+            "manager_name": s.get("player_name"),
+            "team_name": s.get("entry_name"),
+            "total_points": s.get("total"),
+            "event_total": s.get("event_total"),
+            "team_id": s.get("entry"),
+        })
+
+    return json.dumps({
+        "league_id": league_id,
+        "league_name": league_info.get("name"),
+        "standings": results,
+    }, indent=2)
+
+
+@tool
+def get_rival_team(rival_team_id: int, gameweek: int | None = None) -> str:
+    """Fetch a rival's squad for a specific gameweek.
+    Shows their 15 players, captain, formation, points, and recent transfers.
+    """
+    log.info("Tool called: get_rival_team(rival_team_id=%s, gw=%s)", rival_team_id, gameweek)
+    gw = gameweek or _current_gameweek()
+    if gw is None:
+        return json.dumps({"error": "Could not determine current gameweek."})
+
+    all_players = {p["id"]: p for p in _client.get_all_players()}
+    teams = _get_teams_map()
+
+    try:
+        picks_data = _client.get_team_picks(rival_team_id, gw)
+        team_info = _client.get_team_info(rival_team_id)
+        transfers = _client.get_team_transfers(rival_team_id)
+    except Exception as e:
+        return json.dumps({"error": f"Could not fetch rival data: {e}"})
+
+    picks = picks_data.get("picks", [])
+    entry_history = picks_data.get("entry_history", {})
+
+    squad = []
+    for pick in picks:
+        player = all_players.get(pick["element"], {})
+        squad.append({
+            "name": player.get("web_name", "?"),
+            "position": _POSITION_MAP.get(player.get("element_type"), "?"),
+            "team": teams.get(player.get("team"), "?"),
+            "price": player.get("now_cost", 0) / 10,
+            "is_captain": pick.get("is_captain", False),
+            "is_vice_captain": pick.get("is_vice_captain", False),
+            "on_bench": pick.get("position", 0) > 11,
+        })
+
+    # Recent transfers (last 3)
+    recent_transfers = []
+    for t in transfers[:3]:
+        player_in = all_players.get(t["element_in"], {})
+        player_out = all_players.get(t["element_out"], {})
+        recent_transfers.append({
+            "gw": t.get("event"),
+            "in": player_in.get("web_name", "?"),
+            "out": player_out.get("web_name", "?"),
+        })
+
+    return json.dumps({
+        "rival_team_id": rival_team_id,
+        "manager_name": f"{team_info.get('player_first_name', '')} {team_info.get('player_last_name', '')}".strip(),
+        "team_name": team_info.get("name"),
+        "overall_rank": team_info.get("summary_overall_rank"),
+        "total_points": team_info.get("summary_overall_points"),
+        "gw_points": entry_history.get("points"),
+        "squad": squad,
+        "recent_transfers": recent_transfers,
+    }, indent=2)
+
+
+@tool
+def compare_with_rival(rival_team_id: int, gameweek: int | None = None) -> str:
+    """Compare your squad with a rival's squad.
+    Shows: shared players, your differentials, their differentials,
+    captain comparison, and points gap.
+    """
+    log.info("Tool called: compare_with_rival(rival_team_id=%s, gw=%s)", rival_team_id, gameweek)
+    team_id = _get_team_id()
+    if team_id is None:
+        return json.dumps({"error": "FPL_TEAM_ID is not set. Link your team first."})
+
+    gw = gameweek or _current_gameweek()
+    if gw is None:
+        return json.dumps({"error": "Could not determine current gameweek."})
+
+    all_players = {p["id"]: p for p in _client.get_all_players()}
+    teams = _get_teams_map()
+
+    try:
+        my_picks = _client.get_team_picks(team_id, gw)
+        rival_picks = _client.get_team_picks(rival_team_id, gw)
+        my_info = _client.get_team_info(team_id)
+        rival_info = _client.get_team_info(rival_team_id)
+    except Exception as e:
+        return json.dumps({"error": f"Could not fetch data: {e}"})
+
+    my_ids = {p["element"] for p in my_picks.get("picks", [])}
+    rival_ids = {p["element"] for p in rival_picks.get("picks", [])}
+
+    shared_ids = my_ids & rival_ids
+    my_diff_ids = my_ids - rival_ids
+    rival_diff_ids = rival_ids - my_ids
+
+    def _player_info(pid):
+        p = all_players.get(pid, {})
+        return {
+            "name": p.get("web_name", "?"),
+            "position": _POSITION_MAP.get(p.get("element_type"), "?"),
+            "team": teams.get(p.get("team"), "?"),
+            "price": p.get("now_cost", 0) / 10,
+            "form": p.get("form", "0"),
+            "total_points": p.get("total_points", 0),
+        }
+
+    # Captain info
+    my_captain = next((p for p in my_picks.get("picks", []) if p.get("is_captain")), None)
+    rival_captain = next((p for p in rival_picks.get("picks", []) if p.get("is_captain")), None)
+
+    my_cap_name = all_players.get(my_captain["element"], {}).get("web_name") if my_captain else "?"
+    rival_cap_name = all_players.get(rival_captain["element"], {}).get("web_name") if rival_captain else "?"
+
+    my_points = my_info.get("summary_overall_points", 0) or 0
+    rival_points = rival_info.get("summary_overall_points", 0) or 0
+
+    return json.dumps({
+        "comparison_gw": gw,
+        "you": {
+            "team_name": my_info.get("name"),
+            "total_points": my_points,
+            "captain": my_cap_name,
+        },
+        "rival": {
+            "team_id": rival_team_id,
+            "team_name": rival_info.get("name"),
+            "total_points": rival_points,
+            "captain": rival_cap_name,
+        },
+        "points_gap": my_points - rival_points,
+        "shared_players": [_player_info(pid) for pid in shared_ids],
+        "your_differentials": [_player_info(pid) for pid in my_diff_ids],
+        "rival_differentials": [_player_info(pid) for pid in rival_diff_ids],
+        "captain_match": my_cap_name == rival_cap_name,
+    }, indent=2)
+
+
+@tool
+def find_auto_rivals(league_id: int, proximity: int = 3) -> str:
+    """Auto-detect rivals based on rank proximity in a league.
+    Returns managers within +/- proximity ranks of the user.
+    Useful for identifying who you're competing against directly.
+    """
+    log.info("Tool called: find_auto_rivals(league_id=%s, proximity=%s)", league_id, proximity)
+    team_id = _get_team_id()
+    if team_id is None:
+        return json.dumps({"error": "FPL_TEAM_ID is not set. Link your team first."})
+
+    try:
+        data = _client.get_league_standings(league_id)
+    except Exception as e:
+        return json.dumps({"error": f"Could not fetch league {league_id}: {e}"})
+
+    standings = data.get("standings", {}).get("results", [])
+
+    # Find user's entry
+    user_entry = next((s for s in standings if s.get("entry") == team_id), None)
+    if user_entry is None:
+        return json.dumps({
+            "error": "You are not in this league or not on the first page of standings."
+        })
+
+    user_rank = user_entry.get("rank", 0)
+    user_points = user_entry.get("total", 0) or 0
+
+    rivals = []
+    for s in standings:
+        rank = s.get("rank", 0)
+        if s.get("entry") == team_id:
+            continue
+        if abs(rank - user_rank) <= proximity:
+            s_points = s.get("total", 0) or 0
+            rivals.append({
+                "team_id": s.get("entry"),
+                "rank": rank,
+                "rank_delta": rank - user_rank,
+                "manager_name": s.get("player_name"),
+                "team_name": s.get("entry_name"),
+                "total_points": s_points,
+                "points_gap": user_points - s_points,
+            })
+
+    rivals.sort(key=lambda r: abs(r["rank_delta"]))
+
+    return json.dumps({
+        "league_id": league_id,
+        "league_name": data.get("league", {}).get("name"),
+        "your_rank": user_rank,
+        "your_points": user_points,
+        "proximity_range": proximity,
+        "rivals": rivals,
+    }, indent=2)
+
+
+@tool
+def track_rival_transfers(rival_team_id: int, last_n_gws: int = 5) -> str:
+    """Track a rival's recent transfer history.
+    Shows transfers made in the last N gameweeks with player names and prices.
+    Useful for understanding rival strategy and anticipating their moves.
+    """
+    log.info("Tool called: track_rival_transfers(rival_team_id=%s, last_n_gws=%s)",
+             rival_team_id, last_n_gws)
+    all_players = {p["id"]: p for p in _client.get_all_players()}
+
+    try:
+        transfers = _client.get_team_transfers(rival_team_id)
+        team_info = _client.get_team_info(rival_team_id)
+    except Exception as e:
+        return json.dumps({"error": f"Could not fetch rival data: {e}"})
+
+    current_gw = _current_gameweek() or 38
+    min_gw = current_gw - last_n_gws
+
+    recent = []
+    for t in transfers:
+        gw = t.get("event", 0)
+        if gw < min_gw:
+            continue
+        player_in = all_players.get(t["element_in"], {})
+        player_out = all_players.get(t["element_out"], {})
+        recent.append({
+            "gameweek": gw,
+            "in": player_in.get("web_name", "?"),
+            "in_price": t.get("element_in_cost", 0) / 10,
+            "out": player_out.get("web_name", "?"),
+            "out_price": t.get("element_out_cost", 0) / 10,
+            "time": t.get("time"),
+        })
+
+    return json.dumps({
+        "rival_team_id": rival_team_id,
+        "rival_name": f"{team_info.get('player_first_name', '')} {team_info.get('player_last_name', '')}".strip(),
+        "team_name": team_info.get("name"),
+        "transfers_in_range": len(recent),
+        "range_gws": f"GW{min_gw}-{current_gw}",
+        "transfers": recent,
+    }, indent=2, default=str)
+
+
+# ======================================================================
 #  ALL_TOOLS EXPORT — ordered by section
 # ======================================================================
 ALL_TOOLS = [
@@ -1673,6 +1974,13 @@ ALL_TOOLS = [
     get_my_season_history,
     get_my_transfers,
     get_my_team_structured,
+    # League & Rival Tools
+    get_my_leagues,
+    get_league_standings,
+    get_rival_team,
+    compare_with_rival,
+    find_auto_rivals,
+    track_rival_transfers,
     # Planning & Transfer Tools
     get_dream_team_full15,
     recommend_transfers,

@@ -6,7 +6,8 @@ Run:  streamlit run app.py
 Features:
   • App-level sign up / sign in (username + password, stored in PostgreSQL)
   • Link your FPL team via Team ID or FPL email login
-  • 5-tab layout: Chat, My Team, Transfer Hub, Gameweek Prep, Dream Team
+  • Sidebar navigation: Chat, My Team, Transfer Hub, Mini-Leagues, Rival Analysis, Gameweek Prep, Dream Team
+  • Mini-league standings and rival comparison tools
   • Persistent chat history per user (PostgreSQL)
   • Draft Builder with saved gameweek plans
   • All user prompts saved for requirement analysis
@@ -84,6 +85,8 @@ def _init_session():
         "user": None,           # dict from managers table (logged-in user)
         "messages": [],         # in-memory chat messages for display
         "agent": None,
+        "nav_page": "chat",     # current page for sidebar navigation
+        "selected_rival_id": None,  # for rival analysis page
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -391,6 +394,28 @@ with st.sidebar:
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
+
+    st.divider()
+
+    # ── Navigation ────────────────────────────────────────────────────
+    st.markdown("### Navigation")
+
+    nav_options = [
+        ("chat", "💬", "Chat"),
+        ("my_team", "👕", "My Team"),
+        ("transfers", "🔄", "Transfer Hub"),
+        ("leagues", "🏆", "Mini-Leagues"),
+        ("rivals", "⚔️", "Rival Analysis"),
+        ("prep", "📋", "Gameweek Prep"),
+        ("dream", "🌟", "Dream Team"),
+    ]
+
+    for key, icon, label in nav_options:
+        is_current = st.session_state.nav_page == key
+        btn_type = "primary" if is_current else "secondary"
+        if st.button(f"{icon} {label}", key=f"nav_{key}", use_container_width=True, type=btn_type):
+            st.session_state.nav_page = key
+            st.rerun()
 
     st.divider()
 
@@ -1284,7 +1309,322 @@ def render_dream_team_tab():
 
 
 # =====================================================================
-#  MAIN CONTENT AREA — TABBED NAVIGATION
+#  MINI-LEAGUES PAGE
+# =====================================================================
+def render_leagues_page(user: dict):
+    """Render the Mini-Leagues page — league list and standings."""
+    st.subheader("🏆 My Mini-Leagues")
+
+    if not _fpl_linked():
+        st.info("👈 Link your FPL team in the sidebar to see your leagues.")
+        st.stop()
+
+    from fpl.tools import get_my_leagues as _leagues_tool
+    from fpl.tools import get_league_standings as _standings_tool
+
+    with st.spinner("Loading your leagues…"):
+        try:
+            raw = _leagues_tool.invoke({})
+            leagues = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception as e:
+            st.error(f"Could not load leagues: {e}")
+            leagues = []
+
+    if isinstance(leagues, dict) and "error" in leagues:
+        st.error(leagues["error"])
+        return
+
+    if not leagues:
+        st.info("No leagues found. Join a mini-league on the FPL website!")
+        return
+
+    # League selector
+    league_options = {f"{lg['name']} ({lg['type'].upper()} · Rank: {lg['rank']})": lg for lg in leagues}
+    selected_label = st.selectbox("Select a league", options=list(league_options.keys()))
+    selected_league = league_options.get(selected_label)
+
+    if selected_league:
+        st.markdown(f"### {selected_league['name']}")
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Your Rank", selected_league.get("rank", "—"))
+        col2.metric("Last Rank", selected_league.get("last_rank", "—"))
+        col3.metric("Teams", selected_league.get("entry_count", "—"))
+
+        # Standings
+        st.markdown("#### Standings")
+        with st.spinner("Loading standings…"):
+            try:
+                standings_raw = _standings_tool.invoke({
+                    "league_id": selected_league["id"],
+                    "top_n": 50
+                })
+                standings_data = json.loads(standings_raw) if isinstance(standings_raw, str) else standings_raw
+            except Exception as e:
+                st.error(f"Could not load standings: {e}")
+                standings_data = None
+
+        if standings_data and "error" not in standings_data and "standings" in standings_data:
+            import pandas as pd
+
+            team_id = user.get("fpl_team_id")
+            df = pd.DataFrame(standings_data["standings"])
+
+            if not df.empty:
+                # Display with highlighting
+                st.dataframe(
+                    df[["rank", "manager_name", "team_name", "total_points", "event_total"]].rename(columns={
+                        "rank": "Rank",
+                        "manager_name": "Manager",
+                        "team_name": "Team",
+                        "total_points": "Total Pts",
+                        "event_total": "GW Pts",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # Quick rival buttons
+                st.markdown("#### Quick Actions")
+                st.caption("Select a rival to analyze their squad")
+
+                rival_cols = st.columns(3)
+                for i, entry in enumerate(standings_data["standings"][:9]):
+                    if entry.get("team_id") != team_id:
+                        with rival_cols[i % 3]:
+                            if st.button(
+                                f"⚔️ {entry['manager_name'][:12]}",
+                                key=f"rival_{entry['team_id']}",
+                                use_container_width=True,
+                            ):
+                                st.session_state.selected_rival_id = entry["team_id"]
+                                st.session_state.nav_page = "rivals"
+                                st.rerun()
+        elif standings_data and "error" in standings_data:
+            st.error(standings_data["error"])
+
+
+# =====================================================================
+#  RIVAL ANALYSIS PAGE
+# =====================================================================
+def render_rival_analysis_page(user: dict):
+    """Render the Rival Analysis page — comparison and tracking."""
+    st.subheader("⚔️ Rival Analysis")
+
+    if not _fpl_linked():
+        st.info("👈 Link your FPL team in the sidebar to analyze rivals.")
+        st.stop()
+
+    from fpl.tools import compare_with_rival as _compare_tool
+    from fpl.tools import find_auto_rivals as _auto_rivals_tool
+    from fpl.tools import track_rival_transfers as _transfers_tool
+    from fpl.tools import get_my_leagues as _leagues_tool
+    from fpl.tools import get_rival_team as _rival_team_tool
+
+    # Two modes: Auto-detect or Manual
+    mode = st.radio("Mode", ["Auto-Detect Rivals", "Manual Rival ID"], horizontal=True)
+
+    if mode == "Auto-Detect Rivals":
+        # Get leagues for selection
+        with st.spinner("Loading leagues…"):
+            try:
+                leagues_raw = _leagues_tool.invoke({})
+                leagues = json.loads(leagues_raw) if isinstance(leagues_raw, str) else leagues_raw
+            except Exception:
+                leagues = []
+
+        if isinstance(leagues, dict) and "error" in leagues:
+            st.error(leagues["error"])
+            leagues = []
+
+        classic_leagues = [lg for lg in leagues if lg.get("type") == "classic"]
+
+        if classic_leagues:
+            league_options = {lg["name"]: lg["id"] for lg in classic_leagues}
+            selected_league_name = st.selectbox("Select league", options=list(league_options.keys()))
+            selected_league_id = league_options.get(selected_league_name)
+
+            proximity = st.slider("Rank proximity (+/-)", min_value=1, max_value=10, value=3)
+
+            if st.button("🔍 Find Rivals", use_container_width=True):
+                with st.spinner("Finding nearby rivals…"):
+                    try:
+                        rivals_raw = _auto_rivals_tool.invoke({
+                            "league_id": selected_league_id,
+                            "proximity": proximity
+                        })
+                        rivals_data = json.loads(rivals_raw) if isinstance(rivals_raw, str) else rivals_raw
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        rivals_data = None
+
+                if rivals_data and "error" not in rivals_data and "rivals" in rivals_data:
+                    st.success(f"Found **{len(rivals_data['rivals'])}** rivals near your rank")
+                    st.markdown(f"**Your rank:** {rivals_data['your_rank']} ({rivals_data['your_points']} pts)")
+
+                    for rival in rivals_data["rivals"]:
+                        direction = "🔺 Above" if rival['rank_delta'] < 0 else "🔻 Below"
+                        gap_sign = "+" if rival['points_gap'] > 0 else ""
+
+                        with st.expander(
+                            f"{direction} | {rival['manager_name']} · Rank {rival['rank']} · {gap_sign}{rival['points_gap']} pts gap"
+                        ):
+                            col1, col2 = st.columns(2)
+                            col1.metric("Team", rival['team_name'])
+                            col2.metric("Total Points", rival['total_points'])
+
+                            if st.button(
+                                f"⚔️ Compare with {rival['manager_name']}",
+                                key=f"cmp_{rival['team_id']}",
+                                use_container_width=True,
+                            ):
+                                st.session_state.selected_rival_id = rival["team_id"]
+                                st.rerun()
+                elif rivals_data and "error" in rivals_data:
+                    st.error(rivals_data["error"])
+        else:
+            st.info("No classic leagues found. Auto-detect works best with classic leagues.")
+
+    else:  # Manual mode
+        rival_id = st.number_input(
+            "Rival Team ID",
+            min_value=1,
+            step=1,
+            value=st.session_state.get("selected_rival_id") or 1,
+        )
+        if st.button("Set Rival", use_container_width=True):
+            st.session_state.selected_rival_id = int(rival_id)
+            st.rerun()
+
+    # Comparison section
+    rival_id = st.session_state.get("selected_rival_id")
+    if rival_id:
+        st.divider()
+        st.markdown(f"### Analyzing Team #{rival_id}")
+
+        tab_compare, tab_squad, tab_transfers = st.tabs(["📊 Comparison", "👕 Squad", "🔄 Transfers"])
+
+        with tab_compare:
+            if st.button("🔄 Run Comparison", use_container_width=True, key="run_compare"):
+                with st.spinner("Comparing squads…"):
+                    try:
+                        compare_raw = _compare_tool.invoke({"rival_team_id": int(rival_id)})
+                        compare_data = json.loads(compare_raw) if isinstance(compare_raw, str) else compare_raw
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        compare_data = None
+
+                if compare_data and "error" not in compare_data:
+                    # Summary metrics
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Your Points", compare_data["you"]["total_points"])
+                    col2.metric("Rival Points", compare_data["rival"]["total_points"])
+
+                    gap = compare_data['points_gap']
+                    gap_color = "normal" if gap >= 0 else "inverse"
+                    col3.metric("Gap", f"{gap:+}", delta_color=gap_color)
+
+                    # Captain comparison
+                    cap_match = "✅ Same" if compare_data["captain_match"] else "❌ Different"
+                    st.markdown(
+                        f"**Captains:** You: **{compare_data['you']['captain']}** · "
+                        f"Rival: **{compare_data['rival']['captain']}** ({cap_match})"
+                    )
+
+                    st.divider()
+
+                    # Differentials
+                    col_you, col_shared, col_rival = st.columns(3)
+
+                    with col_you:
+                        st.markdown("#### 🟢 Your Differentials")
+                        for p in compare_data["your_differentials"]:
+                            st.markdown(f"**{p['name']}** ({p['position']})")
+                            st.caption(f"{p['team']} · Form: {p['form']} · Pts: {p['total_points']}")
+
+                    with col_shared:
+                        st.markdown("#### ⚪ Shared Players")
+                        for p in compare_data["shared_players"]:
+                            st.markdown(f"**{p['name']}** ({p['position']})")
+
+                    with col_rival:
+                        st.markdown("#### 🔴 Rival's Differentials")
+                        for p in compare_data["rival_differentials"]:
+                            st.markdown(f"**{p['name']}** ({p['position']})")
+                            st.caption(f"{p['team']} · Form: {p['form']} · Pts: {p['total_points']}")
+
+                elif compare_data and "error" in compare_data:
+                    st.error(compare_data["error"])
+
+        with tab_squad:
+            if st.button("👕 Load Rival Squad", use_container_width=True, key="load_rival_squad"):
+                with st.spinner("Loading rival squad…"):
+                    try:
+                        squad_raw = _rival_team_tool.invoke({"rival_team_id": int(rival_id)})
+                        squad_data = json.loads(squad_raw) if isinstance(squad_raw, str) else squad_raw
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        squad_data = None
+
+                if squad_data and "error" not in squad_data:
+                    col1, col2 = st.columns(2)
+                    col1.metric("Manager", squad_data.get("manager_name", "—"))
+                    col2.metric("Team", squad_data.get("team_name", "—"))
+
+                    col3, col4 = st.columns(2)
+                    col3.metric("Total Points", squad_data.get("total_points", "—"))
+                    col4.metric("Overall Rank", f"{squad_data.get('overall_rank', 0):,}" if squad_data.get('overall_rank') else "—")
+
+                    # Display squad
+                    st.markdown("#### Squad")
+                    starters = [p for p in squad_data.get("squad", []) if not p.get("on_bench")]
+                    bench = [p for p in squad_data.get("squad", []) if p.get("on_bench")]
+
+                    _render_pitch(starters=starters, bench=bench, show_pts=False, title="Rival's Squad")
+
+                    # Recent transfers
+                    if squad_data.get("recent_transfers"):
+                        st.markdown("#### Recent Transfers")
+                        for t in squad_data["recent_transfers"]:
+                            st.markdown(f"**GW{t['gw']}:** {t['out']} → {t['in']}")
+
+                elif squad_data and "error" in squad_data:
+                    st.error(squad_data["error"])
+
+        with tab_transfers:
+            gws = st.slider("Last N gameweeks", min_value=1, max_value=10, value=5, key="rival_transfer_gws")
+            if st.button("📋 Track Transfers", use_container_width=True, key="track_transfers"):
+                with st.spinner("Loading transfer history…"):
+                    try:
+                        transfers_raw = _transfers_tool.invoke({
+                            "rival_team_id": int(rival_id),
+                            "last_n_gws": gws
+                        })
+                        transfers_data = json.loads(transfers_raw) if isinstance(transfers_raw, str) else transfers_raw
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        transfers_data = None
+
+                if transfers_data and "error" not in transfers_data:
+                    st.markdown(
+                        f"**{transfers_data['rival_name']}** made "
+                        f"**{transfers_data['transfers_in_range']}** transfers ({transfers_data['range_gws']})"
+                    )
+
+                    if transfers_data.get("transfers"):
+                        for t in transfers_data["transfers"]:
+                            st.markdown(
+                                f"**GW{t['gameweek']}:** {t['out']} (£{t['out_price']:.1f}m) → "
+                                f"{t['in']} (£{t['in_price']:.1f}m)"
+                            )
+                    else:
+                        st.info("No transfers in this range.")
+                elif transfers_data and "error" in transfers_data:
+                    st.error(transfers_data["error"])
+
+
+# =====================================================================
+#  MAIN CONTENT AREA — PAGE ROUTING
 # =====================================================================
 if not os.getenv("OPENAI_API_KEY", "").strip():
     st.warning(
@@ -1308,28 +1648,20 @@ else:
         "or ask general FPL questions"
     )
 
-# ── Top-level tabs ───────────────────────────────────────────────────
-tab_chat, tab_myteam, tab_transfers, tab_prep, tab_dream = st.tabs(
-    ["💬 Chat", "👕 My Team", "🔄 Transfer Hub", "📋 Gameweek Prep", "🏆 Dream Team"]
-)
+# ── Page Routing (sidebar navigation) ────────────────────────────────
+page = st.session_state.get("nav_page", "chat")
 
-# ── Tab 1 — Chat ─────────────────────────────────────────────────────
-with tab_chat:
+if page == "chat":
     render_chat_tab(user)
-
-
-# ── Tab 2 — My Team ──────────────────────────────────────────────────
-with tab_myteam:
+elif page == "my_team":
     render_my_team_tab(user)
-
-# ── Tab 3 — Transfer Hub ────────────────────────────────────────────
-with tab_transfers:
+elif page == "transfers":
     render_transfer_hub_tab(user)
-
-# ── Tab 4 — Gameweek Prep ───────────────────────────────────────────
-with tab_prep:
+elif page == "leagues":
+    render_leagues_page(user)
+elif page == "rivals":
+    render_rival_analysis_page(user)
+elif page == "prep":
     render_gameweek_prep_tab(user)
-
-# ── Tab 5 — Dream Team ──────────────────────────────────────────────
-with tab_dream:
+elif page == "dream":
     render_dream_team_tab()
